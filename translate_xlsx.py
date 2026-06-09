@@ -203,26 +203,31 @@ def translate_all(client, texts: list[str], checkpoint_path: str) -> list[str]:
 
 def collect_xlsx_texts(wb):
     """
-    Collect all cells with CJK text across all sheets.
+    Collect all sheet names and cells with CJK text across all sheets.
     Skips: MergedCell slaves, formulas (=...), non-string values without CJK.
-    Returns: (refs: list[Cell], texts: list[str])
+    Returns:
+      refs:  list of ('sheet', ws) | ('cell', cell)
+      texts: list of str (parallel to refs)
     """
     refs, texts = [], []
     for ws in wb.worksheets:
+        # Sheet name
+        if has_cjk(ws.title):
+            refs.append(('sheet', ws))
+            texts.append(ws.title)
+        # Cells
         for row in ws.iter_rows():
             for cell in row:
-                # Skip merged slave cells — they have no editable value
                 if isinstance(cell, MergedCell):
                     continue
                 val = cell.value
                 if val is None:
                     continue
-                # Skip formulas
                 if isinstance(val, str) and val.startswith('='):
                     continue
                 text = str(val)
                 if has_cjk(text):
-                    refs.append(cell)
+                    refs.append(('cell', cell))
                     texts.append(text)
     return refs, texts
 
@@ -243,9 +248,11 @@ def translate_xlsx(input_path: str, output_path: str):
     sheet_names = wb.sheetnames
     print(f'  Sheets: {", ".join(sheet_names)}')
 
-    print('Collecting cells with Chinese text...')
+    print('Collecting sheet names and cells with Chinese text...')
     refs, texts = collect_xlsx_texts(wb)
-    print(f'  {len(texts)} cells with Chinese text across {len(sheet_names)} sheet(s)')
+    n_sheets = sum(1 for kind, _ in refs if kind == 'sheet')
+    n_cells  = sum(1 for kind, _ in refs if kind == 'cell')
+    print(f'  {n_sheets} sheet name(s) + {n_cells} cells = {len(texts)} texts total')
 
     if not texts:
         print('Nothing to translate.')
@@ -254,12 +261,17 @@ def translate_xlsx(input_path: str, output_path: str):
         return
 
     checkpoint = output_path + '.checkpoint.json'
-    print(f'\nTranslating {len(texts)} cells...')
+    print(f'\nTranslating {len(texts)} texts...')
     translated = translate_all(client, texts, checkpoint)
 
     print('\nWriting translations back...')
-    for cell, trans in zip(refs, translated):
-        cell.value = trans
+    for (kind, target), trans in zip(refs, translated):
+        if kind == 'sheet':
+            # Excel sheet names: max 31 chars, no special chars
+            safe = re.sub(r'[\\/*?\[\]:]', '', trans)[:31].strip()
+            target.title = safe or trans[:31]
+        else:
+            target.value = trans
 
     wb.save(output_path)
     print(f'\nSaved → {output_path}')
